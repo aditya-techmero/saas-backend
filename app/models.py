@@ -1,7 +1,7 @@
 # models.py - Updated ContentJob model
 from sqlalchemy import Column, Integer, String, TIMESTAMP, func, ForeignKey, Text, JSON
 from sqlalchemy.orm import relationship
-from database import Base
+from .database import Base
 
 class User(Base):
     __tablename__ = "users"

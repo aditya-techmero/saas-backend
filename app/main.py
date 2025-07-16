@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
 import logging
 import traceback
@@ -14,7 +14,7 @@ import ast
 import json
 
 
-from models import WordPressCredentials
+from .models import WordPressCredentials
 
 from fastapi.security import OAuth2PasswordBearer
 import jwt
@@ -31,9 +31,9 @@ ALGORITHM = os.getenv("ALGORITHM")
 
 # Try to import your backend modules with error handling
 try:
-    from database import SessionLocal, engine
-    from models import User, Base, ContentJob
-    from auth import verify_password, get_password_hash, create_access_token
+    from .database import SessionLocal, engine
+    from .models import User, Base, ContentJob
+    from .auth import verify_password, get_password_hash, create_access_token
     logger.info("Successfully imported app modules")
 except ImportError as e:
     logger.error(f"Failed to import app modules: {e}")
@@ -112,6 +112,7 @@ class ContentJobCreate(BaseModel):
     contentFormat: Optional[str] = None
     audienceType: Optional[str] = None
     toneOfVoice: Optional[str] = None
+    Outline: Optional[Dict[str, Any]] = None
 
 
 class ContentJobOut(BaseModel):
@@ -151,6 +152,103 @@ class WordPressCredentialsUpdate(BaseModel):
     siteUrl: Optional[str] = None
     username: Optional[str] = None
     applicationPassword: Optional[str] = None
+
+# ===== OUTLINE SCHEMA MODELS =====
+
+class OutlineSection(BaseModel):
+    section_number: int = Field(ge=1, description="Section number starting from 1")
+    title: str = Field(min_length=1, max_length=200, description="Section title")
+    estimated_words: int = Field(ge=1, le=5000, description="Estimated word count for this section")
+    description: str = Field(min_length=1, max_length=1000, description="Description of what this section covers")
+    key_points: List[str] = Field(min_items=1, max_items=10, description="Key points to cover in this section")
+    keywords_to_include: List[str] = Field(max_items=20, description="Keywords to include in this section")
+    
+    @validator('key_points')
+    def validate_key_points(cls, v):
+        if not v:
+            raise ValueError('At least one key point is required')
+        for point in v:
+            if not point.strip():
+                raise ValueError('Key points cannot be empty')
+        return [point.strip() for point in v]
+    
+    @validator('keywords_to_include')
+    def validate_keywords(cls, v):
+        return [kw.strip() for kw in v if kw.strip()]
+
+class OutlineSEOKeywords(BaseModel):
+    primary_keywords: List[str] = Field(min_items=1, max_items=50, description="Primary keywords for SEO")
+    secondary_keywords: List[str] = Field(max_items=100, description="Secondary keywords for SEO")
+    long_tail_keywords: List[str] = Field(max_items=100, description="Long-tail keywords for SEO")
+    
+    @validator('primary_keywords')
+    def validate_primary_keywords(cls, v):
+        if not v:
+            raise ValueError('At least one primary keyword is required')
+        for kw in v:
+            if not kw.strip():
+                raise ValueError('Primary keywords cannot be empty')
+        return [kw.strip() for kw in v]
+    
+    @validator('secondary_keywords', 'long_tail_keywords')
+    def validate_keyword_lists(cls, v):
+        return [kw.strip() for kw in v if kw.strip()]
+
+class OutlineFAQ(BaseModel):
+    question: str = Field(min_length=1, max_length=500, description="FAQ question")
+    answer_preview: str = Field(min_length=1, max_length=1000, description="Brief preview of the answer")
+
+class OutlineSchema(BaseModel):
+    title: str = Field(min_length=1, max_length=300, description="Blog post title")
+    meta_description: str = Field(min_length=120, max_length=160, description="SEO meta description")
+    main_keyword: str = Field(min_length=1, max_length=100, description="Primary keyword for SEO")
+    target_audience: str = Field(min_length=1, max_length=100, description="Target audience")
+    content_format: str = Field(min_length=1, max_length=50, description="Content format (e.g., blog post, guide)")
+    tone_of_voice: str = Field(min_length=1, max_length=50, description="Tone of voice for the content")
+    estimated_word_count: int = Field(ge=300, le=10000, description="Estimated total word count")
+    sections: List[OutlineSection] = Field(min_items=2, max_items=15, description="Content sections")
+    seo_keywords: OutlineSEOKeywords = Field(description="SEO keywords categorized by type")
+    call_to_action: str = Field(min_length=1, max_length=500, description="Call to action for the end of the article")
+    faq_suggestions: List[OutlineFAQ] = Field(max_items=20, description="FAQ suggestions")
+    internal_linking_opportunities: List[str] = Field(max_items=50, description="Internal linking opportunities")
+    generated_at: Optional[str] = Field(default_factory=lambda: datetime.now().isoformat(), description="Generation timestamp")
+    
+    @validator('sections')
+    def validate_sections(cls, v):
+        if len(v) < 2:
+            raise ValueError('At least 2 sections are required (introduction and conclusion)')
+        
+        # Check for duplicate section numbers
+        section_numbers = [s.section_number for s in v]
+        if len(set(section_numbers)) != len(section_numbers):
+            raise ValueError('Section numbers must be unique')
+        
+        # Check if sections are properly numbered (sequential)
+        sorted_numbers = sorted(section_numbers)
+        if sorted_numbers != list(range(1, len(sorted_numbers) + 1)):
+            raise ValueError('Section numbers must be sequential starting from 1')
+        
+        return v
+    
+    @validator('faq_suggestions')
+    def validate_faq_suggestions(cls, v):
+        return v  # FAQ suggestions are optional, so empty list is allowed
+    
+    @validator('internal_linking_opportunities')
+    def validate_internal_linking(cls, v):
+        return [link.strip() for link in v if link.strip()]
+
+class OutlineUpdateRequest(BaseModel):
+    outline: OutlineSchema = Field(description="Complete outline data following the schema")
+
+class OutlineUpdateResponse(BaseModel):
+    success: bool
+    message: str
+    job_id: int
+    updated_at: str
+    outline: Optional[Dict[str, Any]] = None
+
+# ===== END OUTLINE SCHEMA MODELS =====
 
 # WordPress API validation function
 def validate_wordpress_credentials(site_url: str, username: str, app_password: str) -> bool:
@@ -359,6 +457,24 @@ def create_job(
         if not wp_account:
             raise HTTPException(status_code=205, detail="Unauthorized WordPress account ID")
 
+        # Handle optional outline with validation
+        outline_json = None
+        job_status = "pending"
+        
+        if job.Outline:
+            try:
+                # Validate outline against schema if provided
+                outline_schema = OutlineSchema(**job.Outline)
+                outline_json = json.dumps(outline_schema.dict(), indent=2)
+                job_status = "outlined"
+                logger.info(f"Job created with valid outline for user {current_user.username}")
+            except Exception as e:
+                logger.warning(f"Invalid outline provided during job creation: {e}")
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Invalid outline format: {str(e)}"
+                )
+
         new_job = ContentJob(
             user_id=current_user.id,
             title=job.title,
@@ -372,8 +488,9 @@ def create_job(
             contentFormat=job.contentFormat,
             audienceType=job.audienceType,
             toneOfVoice=job.toneOfVoice,
-            status="pending",
-            wordpress_credentials_id=job.wordpress_credentials_id
+            status=job_status,
+            wordpress_credentials_id=job.wordpress_credentials_id,
+            Outline=outline_json
         )
 
         db.add(new_job)
@@ -754,4 +871,145 @@ def get_wordpress_sites_info(
         logger.error(f"Error retrieving WordPress sites info: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to retrieve WordPress sites info: {str(e)}")
+
+
+# ===== JOB OUTLINE UPDATE ENDPOINT =====
+
+@app.put("/jobs/{job_id}/outline", response_model=OutlineUpdateResponse)
+def update_job_outline(
+    job_id: int,
+    request: OutlineUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update a job's outline with comprehensive validation.
+    
+    This endpoint allows users to update the outline for a specific content job.
+    The outline must follow the strict JSON schema with all required fields.
+    """
+    try:
+        # Validate job exists and belongs to current user
+        job = db.query(ContentJob).filter(
+            ContentJob.id == job_id,
+            ContentJob.user_id == current_user.id
+        ).first()
+        
+        if not job:
+            raise HTTPException(
+                status_code=404, 
+                detail="Content job not found or you don't have permission to access it"
+            )
+        
+        # Additional business logic validation
+        if job.status == "completed":
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot update outline for completed jobs"
+            )
+        
+        # Validate word count consistency
+        total_estimated_words = sum(section.estimated_words for section in request.outline.sections)
+        word_count_diff = abs(total_estimated_words - request.outline.estimated_word_count)
+        
+        if word_count_diff > (request.outline.estimated_word_count * 0.2):  # Allow 20% variance
+            raise HTTPException(
+                status_code=400,
+                detail=f"Section word counts ({total_estimated_words}) don't match estimated total ({request.outline.estimated_word_count}). Difference should be within 20%."
+            )
+        
+        # Validate that main keyword appears in outline
+        main_keyword = request.outline.main_keyword.lower()
+        title_contains_keyword = main_keyword in request.outline.title.lower()
+        meta_contains_keyword = main_keyword in request.outline.meta_description.lower()
+        
+        if not (title_contains_keyword or meta_contains_keyword):
+            logger.warning(f"Main keyword '{main_keyword}' not found in title or meta description for job {job_id}")
+        
+        # Convert outline to JSON and update job
+        outline_json = request.outline.dict()
+        outline_json["updated_at"] = datetime.now().isoformat()
+        
+        # Update the job in database
+        job.Outline = json.dumps(outline_json, indent=2)
+        job.status = "outlined"  # Update status to indicate outline is ready
+        
+        db.commit()
+        
+        logger.info(f"Successfully updated outline for job {job_id} by user {current_user.username}")
+        
+        return OutlineUpdateResponse(
+            success=True,
+            message="Outline updated successfully",
+            job_id=job_id,
+            updated_at=outline_json["updated_at"],
+            outline=outline_json
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        # Handle Pydantic validation errors
+        raise HTTPException(
+            status_code=422,
+            detail=f"Validation error: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Error updating job outline: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update job outline: {str(e)}"
+        )
+
+@app.get("/jobs/{job_id}/outline")
+def get_job_outline(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the current outline for a specific job.
+    """
+    try:
+        # Validate job exists and belongs to current user
+        job = db.query(ContentJob).filter(
+            ContentJob.id == job_id,
+            ContentJob.user_id == current_user.id
+        ).first()
+        
+        if not job:
+            raise HTTPException(
+                status_code=404,
+                detail="Content job not found or you don't have permission to access it"
+            )
+        
+        # Parse outline if it exists
+        outline_data = {}
+        if job.Outline:
+            try:
+                outline_data = json.loads(job.Outline)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in outline for job {job_id}")
+                outline_data = {}
+        
+        return {
+            "job_id": job_id,
+            "title": job.title,
+            "status": job.status,
+            "has_outline": bool(job.Outline),
+            "outline": outline_data,
+            "created_at": job.created_at.isoformat() if job.created_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving job outline: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve job outline: {str(e)}"
+        )
 
