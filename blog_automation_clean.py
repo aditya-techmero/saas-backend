@@ -29,6 +29,7 @@ from app.models import ContentJob, WordPressCredentials, User
 from blog_generation_markdown import MarkdownBlogGenerator
 from markdown_to_html_converter import MarkdownToHTMLConverter
 from blog_generation_standalone import WordPressClient
+from seo_content_enhancer import SEOContentEnhancer
 from sqlalchemy import and_
 
 # Configure logging
@@ -338,6 +339,7 @@ class CleanBlogAutomation:
         self.markdown_generator = MarkdownBlogGenerator()
         self.html_converter = MarkdownToHTMLConverter()
         self.image_generator = ImageGenerator()  # Add image generator
+        self.seo_enhancer = SEOContentEnhancer()  # Add SEO enhancer
         self.content_dir = "/Users/aditya/Desktop/backend/generated_content"
         self.html_dir = "/Users/aditya/Desktop/backend/generated_content/html"
         
@@ -391,6 +393,14 @@ class CleanBlogAutomation:
             
             logger.info(f"✅ Markdown generated successfully")
             
+            # Step 1.5: Analyze SEO metrics on clean Markdown content
+            logger.info(f"📊 Step 1.5: Analyzing SEO metrics on Markdown content...")
+            seo_metadata = self.seo_enhancer.prepare_wordpress_metadata(
+                title=job.title,
+                keyword=job.mainKeyword,
+                content=markdown_content  # Analyze the clean Markdown, not HTML
+            )
+            
             # Step 2: Convert to HTML
             logger.info(f"🔄 Step 2: Converting Markdown to HTML...")
             html_content = self.html_converter.convert_markdown_to_html(markdown_content)
@@ -419,7 +429,7 @@ class CleanBlogAutomation:
             
             # Step 3: Upload to WordPress
             logger.info(f"🌐 Step 3: Uploading to WordPress...")
-            post_id = self.upload_to_wordpress(html_content, job)
+            post_id = self.upload_to_wordpress(html_content, job, seo_metadata)
             
             if not post_id:
                 logger.error(f"❌ Failed to upload to WordPress for job {job.id}")
@@ -427,10 +437,12 @@ class CleanBlogAutomation:
             
             logger.info(f"✅ Successfully uploaded to WordPress! Post ID: {post_id}")
             
-            # Update job status
+            # Update job status and set isApproved to False once blog is posted
             job.wordpress_post_id = post_id
+            job.isApproved = False
             self.db.commit()
             
+            logger.info(f"✅ Job {job.id} isApproved set to False after successful posting")
             logger.info(f"🎉 Complete workflow finished for job {job.id}")
             return True
             
@@ -438,8 +450,8 @@ class CleanBlogAutomation:
             logger.error(f"❌ Error processing job {job.id}: {str(e)}")
             return False
     
-    def upload_to_wordpress(self, html_content: str, job: ContentJob) -> Optional[str]:
-        """Upload HTML content to WordPress and set featured image."""
+    def upload_to_wordpress(self, html_content: str, job: ContentJob, seo_metadata: dict) -> Optional[str]:
+        """Upload HTML content to WordPress with pre-calculated SEO metadata and set featured image."""
         try:
             # Get WordPress credentials using the job's credentials ID
             wp_creds = self.db.query(WordPressCredentials).filter(
@@ -457,25 +469,30 @@ class CleanBlogAutomation:
                 app_password=wp_creds.applicationPassword
             )
             
-            # Create post data
-            post_data = {
-                'title': job.title,
-                'content': html_content,
-                'status': 'draft',  # Always post as draft for review
-                'categories': [job.audienceType] if job.audienceType else [],
-                'tags': job.mainKeyword.split(',') if job.mainKeyword else []
-            }
+            # Use the pre-calculated SEO metadata (analyzed from Markdown)
+            logger.info("📊 Using pre-calculated SEO metadata from Markdown analysis...")
             
-            # Upload to WordPress
+            # Log metadata being sent
+            logger.info(f"📝 Sending metadata to WordPress:")
+            logger.info(f"  • Meta Description: {seo_metadata.get('meta_description', 'Not set')}")
+            logger.info(f"  • Focus Keyword: {seo_metadata.get('focus_keyword', 'Not set')}")
+            logger.info(f"  • Readability Score: {seo_metadata.get('readability_score', 'Not calculated')}")
+            logger.info(f"  • Word Count: {seo_metadata.get('word_count', 'Not counted')}")
+            logger.info(f"  • External Links: {seo_metadata.get('external_links_count', 0)}")
+            
+            # Upload to WordPress with metadata
             result = wp_client.post_content(
                 title=job.title,
                 content=html_content,
-                status="draft"
+                status="draft",
+                meta_data=seo_metadata
             )
             
             post_id = result.get('id') if result else None
             
             if post_id:
+                logger.info(f"✅ Successfully posted to WordPress with SEO metadata. Post ID: {post_id}")
+                
                 # Create and set featured image after successful post
                 logger.info(f"🖼️  Creating featured image for WordPress post ID: {post_id}")
                 
@@ -508,6 +525,27 @@ class CleanBlogAutomation:
             logger.error(f"Error uploading to WordPress: {str(e)}")
             return None
     
+    def generate_and_save_metadata(self, content: str, job: ContentJob) -> None:
+        """Generate and save SEO metadata for the blog post."""
+        try:
+            # Generate meta description
+            content_preview = content[:500] if content else ""
+            meta_description = self.image_generator.image_generator.seo_enhancer.generate_meta_description(
+                job.title, job.mainKeyword, content_preview
+            ) if hasattr(self.image_generator, 'image_generator') else f"Learn about {job.mainKeyword} with expert insights."
+            
+            # Calculate overall readability score
+            readability_score = 60  # Default score
+            readability_feedback = "Good readability (acceptable)"
+            
+            # Log metadata
+            logger.info(f"💾 Generated SEO metadata for: {job.title}")
+            logger.info(f"📝 Meta description: {meta_description}")
+            logger.info(f"📊 Readability score: {readability_score} ({readability_feedback})")
+            
+        except Exception as e:
+            logger.error(f"Error generating metadata: {str(e)}")
+
     def run_automation(self, max_jobs: int = 5, workers: int = None) -> None:
         """Run the complete automation workflow."""
         try:

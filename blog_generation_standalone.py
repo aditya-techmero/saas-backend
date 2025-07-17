@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from app.database import SessionLocal, engine
 from app.models import ContentJob, WordPressCredentials, User
+from seo_content_enhancer import SEOContentEnhancer
 
 # Configure logging
 logging.basicConfig(
@@ -86,8 +87,8 @@ class WordPressClient:
         self.app_password = app_password
         self.api_url = f"{self.site_url}/wp-json/wp/v2"
         
-    def post_content(self, title: str, content: str, status: str = "draft") -> Dict[str, Any]:
-        """Post content to WordPress."""
+    def post_content(self, title: str, content: str, status: str = "draft", meta_data: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Post content to WordPress with optional metadata."""
         try:
             # Prepare the post data
             post_data = {
@@ -96,6 +97,10 @@ class WordPressClient:
                 'status': status,
                 'format': 'standard'
             }
+            
+            # Add meta data if provided
+            if meta_data:
+                post_data['meta'] = meta_data
             
             # Make the request
             response = requests.post(
@@ -108,6 +113,11 @@ class WordPressClient:
             if response.status_code in [200, 201]:
                 result = response.json()
                 logger.info(f"Successfully posted to WordPress. Post ID: {result.get('id')}")
+                
+                # If we have metadata, update the post with additional meta fields
+                if meta_data and result.get('id'):
+                    self.update_post_metadata(result['id'], meta_data)
+                
                 return result
             else:
                 logger.error(f"WordPress API error: {response.status_code} - {response.text}")
@@ -116,6 +126,68 @@ class WordPressClient:
         except Exception as e:
             logger.error(f"Error posting to WordPress: {str(e)}")
             raise BlogGenerationError(f"Error posting to WordPress: {str(e)}")
+    
+    def update_post_metadata(self, post_id: int, meta_data: Dict[str, Any]) -> bool:
+        """Update post metadata using WordPress REST API."""
+        try:
+            # Prepare metadata for WordPress
+            wp_meta = {}
+            
+            # Add meta description (for SEO plugins like Yoast, RankMath, etc.)
+            if 'meta_description' in meta_data:
+                wp_meta['_yoast_wpseo_metadesc'] = meta_data['meta_description']
+                wp_meta['_genesis_description'] = meta_data['meta_description']
+                wp_meta['_aioseop_description'] = meta_data['meta_description']
+                wp_meta['rank_math_description'] = meta_data['meta_description']
+                wp_meta['seo_meta_description'] = meta_data['meta_description']
+                
+            # Add readability score
+            if 'readability_score' in meta_data:
+                wp_meta['seo_readability_score'] = meta_data['readability_score']
+                wp_meta['flesch_reading_ease'] = meta_data['readability_score']
+                
+            # Add keyword information
+            if 'focus_keyword' in meta_data:
+                wp_meta['_yoast_wpseo_focuskw'] = meta_data['focus_keyword']
+                wp_meta['rank_math_focus_keyword'] = meta_data['focus_keyword']
+                wp_meta['seo_focus_keyword'] = meta_data['focus_keyword']
+                
+            # Add content analysis
+            if 'content_analysis' in meta_data:
+                wp_meta['seo_content_analysis'] = json.dumps(meta_data['content_analysis'])
+                
+            # Add external links count
+            if 'external_links_count' in meta_data:
+                wp_meta['seo_external_links_count'] = meta_data['external_links_count']
+                
+            # Add word count
+            if 'word_count' in meta_data:
+                wp_meta['seo_word_count'] = meta_data['word_count']
+                
+            # Update the post with metadata
+            if wp_meta:
+                update_data = {'meta': wp_meta}
+                
+                response = requests.post(
+                    f"{self.api_url}/posts/{post_id}",
+                    json=update_data,
+                    auth=HTTPBasicAuth(self.username, self.app_password),
+                    headers={'Content-Type': 'application/json'}
+                )
+                
+                if response.status_code in [200, 201]:
+                    logger.info(f"Successfully updated metadata for post ID: {post_id}")
+                    logger.info(f"Updated meta fields: {list(wp_meta.keys())}")
+                    return True
+                else:
+                    logger.warning(f"Failed to update metadata: {response.status_code} - {response.text}")
+                    return False
+                    
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating post metadata: {str(e)}")
+            return False
 
 class ImageGenerator:
     """Handles image generation and insertion for blog posts."""
@@ -248,6 +320,7 @@ class BlogGenerator:
         self.db: Session = SessionLocal()
         self.openai_client = OpenAIClient(os.getenv('OPENAI_API_KEY'))
         self.image_generator = ImageGenerator()
+        self.seo_enhancer = SEOContentEnhancer()
         
     def __del__(self):
         if hasattr(self, 'db'):
@@ -312,12 +385,23 @@ class BlogGenerator:
                 max_tokens=2000
             )
             
+            # Enhance content for readability
+            generated_content = self.seo_enhancer.enhance_content_readability(generated_content)
+            
+            # Add external links
+            content_category = self.seo_enhancer.determine_content_category(job.title, job.mainKeyword)
+            generated_content = self.seo_enhancer.add_external_links(generated_content, job.mainKeyword, content_category)
+            
+            # Calculate readability score
+            readability_score = self.seo_enhancer.calculate_readability_score(generated_content)
+            readability_feedback = self.seo_enhancer.get_readability_feedback(readability_score)
+            
             # Format the content as WordPress blocks
             formatted_content = self.format_as_wordpress_blocks(
                 generated_content, section_title, heading_tag
             )
             
-            logger.info(f"Generated content for section {section_index + 1}: {section_title}")
+            logger.info(f"Generated content for section {section_index + 1}: {section_title} - Readability: {readability_score:.1f} ({readability_feedback})")
             return (section_index, formatted_content)
             
         except Exception as e:
@@ -343,12 +427,23 @@ class BlogGenerator:
                 max_tokens=2000
             )
             
+            # Enhance content for readability
+            generated_content = self.seo_enhancer.enhance_content_readability(generated_content)
+            
+            # Add external links
+            content_category = self.seo_enhancer.determine_content_category(job.title, job.mainKeyword)
+            generated_content = self.seo_enhancer.add_external_links(generated_content, job.mainKeyword, content_category)
+            
+            # Calculate readability score
+            readability_score = self.seo_enhancer.calculate_readability_score(generated_content)
+            readability_feedback = self.seo_enhancer.get_readability_feedback(readability_score)
+            
             # Format the content as WordPress blocks
             formatted_content = self.format_as_wordpress_blocks(
                 generated_content, section_title, heading_tag
             )
             
-            logger.info(f"Generated content for section: {section_title}")
+            logger.info(f"Generated content for section: {section_title} - Readability: {readability_score:.1f} ({readability_feedback})")
             return formatted_content
             
         except Exception as e:
@@ -415,6 +510,20 @@ class BlogGenerator:
         }
         section_word_count = word_count_map.get(article_length, '800-1200')
         
+        # Get SEO-enhanced prompt
+        seo_prompts = self.seo_enhancer.get_enhanced_prompts(None)  # Will create a generic job-like object
+        
+        # Create a temporary job-like object for the prompt
+        temp_job = type('obj', (object,), {
+            'title': f"Section: {section_title}",
+            'mainKeyword': main_keyword,
+            'related_keywords': related_keywords,
+            'toneOfVoice': tone_of_voice,
+            'audienceType': audience_type
+        })()
+        
+        enhanced_prompts = self.seo_enhancer.get_enhanced_prompts(temp_job)
+        
         # Build the section outline
         section_outline = ""
         if section_content:
@@ -442,6 +551,15 @@ class BlogGenerator:
 
 ## Section Structure to Follow:
 {section_outline}
+
+## SEO & READABILITY REQUIREMENTS:
+1. **Readability**: Use simple, clear language. Prefer short sentences (15-20 words max).
+2. **Paragraph Length**: Keep paragraphs short (3-4 sentences max, 50-75 words).
+3. **Transition Words**: Use transition words for better flow (however, moreover, furthermore, etc.).
+4. **Active Voice**: Use active voice (subject + verb + object). Avoid passive constructions.
+5. **External Links**: Include 1-2 references to authoritative sources.
+6. **Flesch Reading Ease**: Target 60+ score (use shorter sentences, common words).
+7. **Keyword Density**: Use main keyword naturally 2-3 times per 200 words.
 
 ## Writing Guidelines:
 1. Write in a conversational, engaging tone
@@ -499,65 +617,72 @@ Write the content now:"""
     
     def generate_introduction(self, job: ContentJob) -> str:
         """Generate introduction section."""
-        prompt = f"""Write a compelling introduction for a blog post titled "{job.title}".
-
-## Requirements:
-- Hook the reader immediately with an interesting fact, question, or statistic
-- Introduce the main topic: {job.mainKeyword}
-- Set clear expectations for what the reader will learn
-- Use a {job.toneOfVoice or 'conversational'} tone
-- Target audience: {job.audienceType or 'general'}
-- Length: 150-200 words
-- Include the main keyword naturally: {job.mainKeyword}
-
-## Structure:
-1. Attention-grabbing opening
-2. Brief context about the topic
-3. Preview of what's covered in the article
-4. Value proposition (what they'll gain)
-
-Write the introduction now:"""
+        # Get SEO-enhanced prompts
+        seo_prompts = self.seo_enhancer.get_enhanced_prompts(job)
         
+        # Generate introduction content
         generated_content = self.openai_client.generate_text(
-            prompt=prompt,
+            prompt=seo_prompts['introduction'],
             temperature=0.7,
             max_tokens=500
         )
         
+        # Enhance for readability
+        generated_content = self.seo_enhancer.enhance_content_readability(generated_content)
+        
+        # Add external links
+        content_category = self.seo_enhancer.determine_content_category(job.title, job.mainKeyword)
+        generated_content = self.seo_enhancer.add_external_links(generated_content, job.mainKeyword, content_category)
+        
+        # Convert markdown to HTML and format as WordPress blocks
+        html_content = self.convert_markdown_to_html(generated_content)
+        
         # Format as WordPress blocks
-        formatted_content = '<!-- wp:paragraph -->\n<p>' + generated_content.replace('\n\n', '</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>') + '</p>\n<!-- /wp:paragraph -->\n\n'
+        formatted_content = '<!-- wp:paragraph -->\n<p>' + html_content.replace('\n\n', '</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>') + '</p>\n<!-- /wp:paragraph -->\n\n'
         
         return formatted_content
     
+    def convert_markdown_to_html(self, markdown_content: str) -> str:
+        """Convert basic markdown to HTML."""
+        # Convert basic markdown formatting
+        content = markdown_content
+        
+        # Bold text
+        content = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', content)
+        
+        # Italic text
+        content = re.sub(r'\*(.*?)\*', r'<em>\1</em>', content)
+        
+        # Links
+        content = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', content)
+        
+        return content
+    
     def generate_conclusion(self, job: ContentJob) -> str:
         """Generate conclusion section."""
-        prompt = f"""Write a compelling conclusion for a blog post titled "{job.title}".
-
-## Requirements:
-- Summarize the key points covered in the article
-- Provide actionable next steps for the reader
-- Include a call-to-action or thought-provoking question
-- Use a {job.toneOfVoice or 'conversational'} tone
-- Length: 100-150 words
-- Include the main keyword naturally: {job.mainKeyword}
-
-## Structure:
-1. Brief summary of main points
-2. Key takeaway or insight
-3. Next steps or call-to-action
-4. Engaging closing statement
-
-Write the conclusion now:"""
+        # Get SEO-enhanced prompts
+        seo_prompts = self.seo_enhancer.get_enhanced_prompts(job)
         
+        # Generate conclusion content
         generated_content = self.openai_client.generate_text(
-            prompt=prompt,
+            prompt=seo_prompts['conclusion'],
             temperature=0.7,
             max_tokens=400
         )
         
+        # Enhance for readability
+        generated_content = self.seo_enhancer.enhance_content_readability(generated_content)
+        
+        # Add external links
+        content_category = self.seo_enhancer.determine_content_category(job.title, job.mainKeyword)
+        generated_content = self.seo_enhancer.add_external_links(generated_content, job.mainKeyword, content_category)
+        
+        # Convert markdown to HTML
+        html_content = self.convert_markdown_to_html(generated_content)
+        
         # Format as WordPress blocks
         formatted_content = '<!-- wp:heading {"level":2} -->\n<h2>Conclusion</h2>\n<!-- /wp:heading -->\n\n'
-        formatted_content += '<!-- wp:paragraph -->\n<p>' + generated_content.replace('\n\n', '</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>') + '</p>\n<!-- /wp:paragraph -->\n\n'
+        formatted_content += '<!-- wp:paragraph -->\n<p>' + html_content.replace('\n\n', '</p>\n<!-- /wp:paragraph -->\n\n<!-- wp:paragraph -->\n<p>') + '</p>\n<!-- /wp:paragraph -->\n\n'
         
         return formatted_content
     
@@ -736,7 +861,65 @@ Write 5-7 FAQs now:"""
             # Return original content if image processing fails
             return content
     
-    # ...existing methods...
+    def post_to_wordpress(self, job: ContentJob, content: str) -> Dict[str, Any]:
+        """Post content to WordPress with SEO metadata."""
+        try:
+            # Get WordPress credentials
+            wp_creds = self.db.query(WordPressCredentials).filter(
+                WordPressCredentials.id == job.wordpress_credentials_id
+            ).first()
+            
+            if not wp_creds:
+                logger.error(f"WordPress credentials not found for job {job.id}")
+                return {}
+            
+            # Initialize WordPress client
+            wp_client = WordPressClient(
+                site_url=wp_creds.siteUrl,
+                username=wp_creds.username,
+                app_password=wp_creds.applicationPassword
+            )
+            
+            # Prepare SEO metadata
+            logger.info("📊 Preparing SEO metadata for WordPress...")
+            metadata = self.seo_enhancer.prepare_wordpress_metadata(
+                title=job.title,
+                keyword=job.mainKeyword,
+                content=content
+            )
+            
+            # Log metadata being sent
+            logger.info(f"📝 Sending metadata to WordPress:")
+            logger.info(f"  • Meta Description: {metadata.get('meta_description', 'Not set')}")
+            logger.info(f"  • Focus Keyword: {metadata.get('focus_keyword', 'Not set')}")
+            logger.info(f"  • Readability Score: {metadata.get('readability_score', 'Not calculated')}")
+            logger.info(f"  • Word Count: {metadata.get('word_count', 'Not counted')}")
+            logger.info(f"  • External Links: {metadata.get('external_links_count', 0)}")
+            
+            # Post to WordPress with metadata
+            result = wp_client.post_content(
+                title=job.title,
+                content=content,
+                status="draft",
+                meta_data=metadata
+            )
+            
+            if result:
+                logger.info(f"✅ Successfully posted to WordPress with SEO metadata. Post ID: {result.get('id')}")
+                
+                # Update job with WordPress post ID
+                job.wordpress_post_id = result.get('id')
+                self.db.commit()
+                
+                return result
+            else:
+                logger.error("❌ Failed to post to WordPress")
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Error posting to WordPress: {str(e)}")
+            return {}
+
     def process_job(self, job: ContentJob) -> bool:
         """Process a single content job."""
         try:

@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 import logging
 import traceback
 from fastapi.responses import JSONResponse
@@ -127,8 +128,8 @@ class ContentJobOut(BaseModel):
     competitor_url_2: Optional[str] = None
     status: bool  # Changed from str to bool
     isApproved: bool  # New field for approval status
-    semantic_keywords: Optional[List[str]] = None
-    semantic_keywords_2: Optional[List[str]] = None
+    semantic_keywords: Optional[Dict[str, Any]] = None  # Changed from List[str] to Dict[str, Any]
+    semantic_keywords_2: Optional[Dict[str, Any]] = None  # Changed from List[str] to Dict[str, Any]
     outline: Optional[Dict[str, Any]] = None
     created_at: str
     
@@ -388,7 +389,7 @@ def health_check():
     try:
         # Test database connection
         db = SessionLocal()
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
         db.close()
         return {"status": "healthy", "database": "connected"}
     except Exception as e:
@@ -428,8 +429,8 @@ def get_my_jobs(current_user: User = Depends(get_current_user), db: Session = De
                 "competitor_url_2": job.competitor_url_2,
                 "status": job.status,  # Now boolean
                 "isApproved": job.isApproved,  # New field
-                "semantic_keywords": job.semantic_keywords if job.semantic_keywords else [],
-                "semantic_keywords_2": job.semantic_keywords_2 if job.semantic_keywords_2 else [],
+                "semantic_keywords": job.semantic_keywords if job.semantic_keywords else {},
+                "semantic_keywords_2": job.semantic_keywords_2 if isinstance(job.semantic_keywords_2, dict) else {"keywords": job.semantic_keywords_2} if job.semantic_keywords_2 else {},
                 "outline": outline,
                 "created_at": job.created_at.isoformat() if isinstance(job.created_at, datetime) else str(job.created_at),
                 "wordpress_credentials_id": job.wordpress_credentials_id,  # <-- Add this line

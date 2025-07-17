@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.database import SessionLocal, engine
 from app.models import ContentJob, WordPressCredentials, User
 from blog_generation_standalone import BlogGenerator as BaseGenerator, OpenAIClient, WordPressClient
+from seo_content_enhancer import SEOContentEnhancer
 
 # Configure logging
 logging.basicConfig(
@@ -252,6 +253,7 @@ class EnhancedBlogGenerator(BaseGenerator):
     def __init__(self):
         super().__init__()
         self.image_generator = ImageGenerator()
+        self.seo_enhancer = SEOContentEnhancer()
     
     def add_images_to_content(self, content: str, job: ContentJob) -> str:
         """Add images to the blog content."""

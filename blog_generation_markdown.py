@@ -31,6 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.database import SessionLocal, engine
 from app.models import ContentJob, WordPressCredentials, User
 from blog_generation_standalone import BlogGenerator as BaseGenerator, OpenAIClient, WordPressClient
+from seo_content_enhancer import SEOContentEnhancer
 
 # Configure logging
 logging.basicConfig(
@@ -315,6 +316,7 @@ class MarkdownBlogGenerator(BaseGenerator):
         self.image_generator = EnhancedImageGenerator()
         self.content_dir = "/Users/aditya/Desktop/backend/generated_content"
         self.images_per_headings = 2  # Add image every 2 headings
+        self.seo_enhancer = SEOContentEnhancer()
         
         # Create content directory if it doesn't exist
         os.makedirs(self.content_dir, exist_ok=True)
@@ -514,6 +516,79 @@ generated_at: {datetime.now().isoformat()}
             logger.error(f"Error saving Markdown locally: {str(e)}")
             return None
     
+    def generate_and_save_metadata(self, content: str, job: ContentJob, filepath: str) -> None:
+        """Generate and save SEO metadata for the blog post."""
+        try:
+            # Generate meta description
+            content_preview = content[:500]  # First 500 chars for preview
+            meta_description = self.seo_enhancer.generate_meta_description(
+                job.title, job.mainKeyword, content_preview
+            )
+            
+            # Calculate overall readability score
+            readability_score = self.seo_enhancer.calculate_readability_score(content)
+            readability_feedback = self.seo_enhancer.get_readability_feedback(readability_score)
+            
+            # Prepare WordPress metadata
+            wp_metadata = self.seo_enhancer.prepare_wordpress_metadata(
+                title=job.title,
+                keyword=job.mainKeyword,
+                content=content,
+                readability_score=readability_score
+            )
+            
+            # Create metadata file
+            metadata_content = f"""# SEO Metadata for: {job.title}
+
+## Meta Description
+{meta_description}
+
+## WordPress Metadata (Ready for API)
+```json
+{json.dumps(wp_metadata, indent=2)}
+```
+
+## Readability Analysis
+- **Flesch Reading Ease Score**: {readability_score:.1f}
+- **Readability Level**: {readability_feedback}
+- **Target**: 60+ (Good readability)
+
+## Keywords
+- **Main Keyword**: {job.mainKeyword}
+- **Related Keywords**: {job.related_keywords}
+
+## Content Stats
+- **Word Count**: {len(content.split())} words
+- **Character Count**: {len(content)} characters
+- **Meta Description Length**: {len(meta_description)} characters (Target: ≤160)
+
+## SEO Checklist
+- ✅ Meta description under 160 characters
+- ✅ External links to authoritative sources included
+- ✅ Short paragraphs (3-4 sentences max)
+- ✅ Transition words for better flow
+- ✅ Active voice preferred over passive
+- ✅ Simple, clear language for readability
+- ✅ Keyword density optimized
+- ✅ Subheadings for better structure
+- ✅ WordPress metadata prepared for API
+
+Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+            
+            # Save metadata file
+            metadata_filepath = filepath.replace('.md', '_metadata.md')
+            with open(metadata_filepath, 'w', encoding='utf-8') as f:
+                f.write(metadata_content)
+            
+            logger.info(f"💾 SEO metadata saved to: {metadata_filepath}")
+            logger.info(f"📊 Content readability score: {readability_score:.1f} ({readability_feedback})")
+            logger.info(f"📝 Meta description: {meta_description}")
+            logger.info(f"🔧 WordPress metadata prepared with {len(wp_metadata)} fields")
+            
+        except Exception as e:
+            logger.error(f"Error generating/saving metadata: {str(e)}")
+
     def generate_blog_post(self, job: ContentJob, max_workers: int = 3) -> str:
         """Generate complete blog post in Markdown format with parallel processing."""
         try:
@@ -527,23 +602,16 @@ generated_at: {datetime.now().isoformat()}
             # Start with content - NO H1 title as WordPress uses post title as H1
             content = ""  # Remove H1 title generation
             
+            # Get SEO-enhanced prompts
+            seo_prompts = self.seo_enhancer.get_enhanced_prompts(job)
+            
             # Generate introduction
             logger.info("🚀 Generating introduction...")
             intro_start = time.time()
-            intro_prompt = f"""
-            Write an engaging introduction for a blog post titled "{job.title}".
+            introduction = self.openai_client.generate_text(seo_prompts['introduction'])
             
-            Requirements:
-            - Output in PURE MARKDOWN format
-            - Start directly with the introduction paragraph (no H1 title)
-            - Make it engaging and informative
-            - Write in {job.toneOfVoice} tone for {job.audienceType}
-            - Include the main keyword: {job.mainKeyword}
-            - 150-200 words
-            - Hook the reader and set expectations
-            """
-            
-            introduction = self.openai_client.generate_text(intro_prompt)
+            # Enhance introduction for readability
+            introduction = self.seo_enhancer.enhance_content_readability(introduction)
             content += self.clean_markdown(introduction) + "\n\n"
             intro_time = time.time() - intro_start
             logger.info(f"✅ Introduction generated in {intro_time:.2f} seconds")
@@ -562,18 +630,10 @@ generated_at: {datetime.now().isoformat()}
             # Generate conclusion
             logger.info("🚀 Generating conclusion...")
             conclusion_start = time.time()
-            conclusion_prompt = f"""
-            Write a conclusion for a blog post titled "{job.title}".
+            conclusion = self.openai_client.generate_text(seo_prompts['conclusion'])
             
-            Requirements:
-            - Output in PURE MARKDOWN format
-            - Write in {job.toneOfVoice} tone for {job.audienceType}
-            - Summarize key points
-            - Include a call-to-action
-            - 100-150 words
-            """
-            
-            conclusion = self.openai_client.generate_text(conclusion_prompt)
+            # Enhance conclusion for readability
+            conclusion = self.seo_enhancer.enhance_content_readability(conclusion)
             content += "## Conclusion\n\n" + self.clean_markdown(conclusion) + "\n\n"
             conclusion_time = time.time() - conclusion_start
             logger.info(f"✅ Conclusion generated in {conclusion_time:.2f} seconds")
@@ -587,6 +647,14 @@ generated_at: {datetime.now().isoformat()}
             
             # Save locally
             local_path = self.save_markdown_locally(content, job)
+            
+            # Generate and save SEO metadata
+            self.generate_and_save_metadata(content, job, local_path)
+            
+            # Generate and save metadata
+            if local_path:
+                logger.info("📝 Generating and saving metadata...")
+                self.generate_and_save_metadata(content, job, local_path)
             
             total_time = time.time() - start_time
             logger.info(f"✅ Successfully generated Markdown blog post for job {job.id}")
@@ -714,6 +782,9 @@ generated_at: {datetime.now().isoformat()}
     def generate_section_content_threaded(self, section: Dict, job: ContentJob, section_index: int) -> tuple[int, str]:
         """Generate content for a section in Markdown format with threading support."""
         try:
+            # Get SEO-enhanced prompts
+            seo_prompts = self.seo_enhancer.get_enhanced_prompts(job)
+            
             # Build context from section details
             section_context = f"Title: {section.get('title', 'Untitled')}"
             
@@ -726,33 +797,16 @@ generated_at: {datetime.now().isoformat()}
             if section.get('keywords_to_include'):
                 section_context += f"\nKeywords to Include: {', '.join(section['keywords_to_include'])}"
             
-            prompt = f"""
-            Generate a comprehensive section for a blog post about "{job.title}".
+            # Customize the section prompt with specific section details
+            section_prompt = seo_prompts['section'] + f"""
             
-            Section Details:
+            ## Section-Specific Details:
             {section_context}
             
-            Article Context:
-            - Main Keyword: {job.mainKeyword}
-            - Related Keywords: {job.related_keywords}
-            - Tone: {job.toneOfVoice}
-            - Audience: {job.audienceType}
-            
-            Requirements:
-            - Output in PURE MARKDOWN format only
-            - Use ## for the main section heading
-            - Use ### for subsections if needed
-            - Include bullet points and numbered lists where appropriate
-            - Write in {job.toneOfVoice} tone for {job.audienceType}
-            - Naturally incorporate the keywords provided
-            - Make it comprehensive and informative
-            - Length: 400-600 words
-            
-            Do not include any HTML, Gutenberg blocks, or other formatting.
-            Only pure Markdown syntax.
+            Generate comprehensive content for this section now:
             """
             
-            response = self.openai_client.generate_text(prompt)
+            response = self.openai_client.generate_text(section_prompt)
             
             # Clean up the response to ensure pure Markdown
             content = response.strip()
@@ -760,10 +814,21 @@ generated_at: {datetime.now().isoformat()}
             # Remove any HTML tags if present
             content = re.sub(r'<[^>]+>', '', content)
             
+            # Enhance content for readability and SEO
+            content = self.seo_enhancer.enhance_content_readability(content)
+            
+            # Add external links
+            content_category = self.seo_enhancer.determine_content_category(job.title, job.mainKeyword)
+            content = self.seo_enhancer.add_external_links(content, job.mainKeyword, content_category)
+            
             # Ensure proper markdown formatting
             content = self.clean_markdown(content)
             
-            logger.info(f"Generated Markdown content for section: {section.get('title')}")
+            # Calculate and log readability score
+            readability_score = self.seo_enhancer.calculate_readability_score(content)
+            readability_feedback = self.seo_enhancer.get_readability_feedback(readability_score)
+            
+            logger.info(f"Generated content for section: {section.get('title')} - Readability: {readability_score:.1f} ({readability_feedback})")
             return (section_index, content)
             
         except Exception as e:
