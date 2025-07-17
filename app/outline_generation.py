@@ -26,7 +26,7 @@ load_dotenv()
 sys.path.append(os.path.dirname(__file__))
 
 from database import SessionLocal, Base
-from sqlalchemy import Column, Integer, String, TIMESTAMP, func, ForeignKey, Text, JSON
+from sqlalchemy import Column, Integer, String, TIMESTAMP, func, ForeignKey, Text, JSON, Boolean
 from sqlalchemy.orm import relationship
 
 # Define ContentJob model inline to avoid import issues
@@ -36,7 +36,8 @@ class ContentJob(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, nullable=False)
     title = Column(Text, nullable=True)
-    status = Column(Text, nullable=True)
+    status = Column(Boolean, nullable=False, default=False)  # False = pending, True = outlined
+    isApproved = Column("isapproved", Boolean, nullable=False, default=False)  # PostgreSQL converts to lowercase
     created_at = Column(TIMESTAMP, server_default=func.now())
     outline_prompt = Column(Text, nullable=True)
     
@@ -87,7 +88,7 @@ def get_pending_jobs(limit: int = 10) -> List[ContentJob]:
     db = SessionLocal()
     try:
         jobs = db.query(ContentJob).filter(
-            ContentJob.status == 'pending'
+            ContentJob.status == False  # False = pending
         ).limit(limit).all()
         
         logger.info(f"Retrieved {len(jobs)} pending jobs from database")
@@ -644,7 +645,7 @@ def update_job_with_results(job_id: int, semantic_keywords: Dict[str, Any], comp
         # Update job with results
         job.semantic_keywords = semantic_keywords
         job.Outline = json.dumps(outline, indent=2)
-        job.status = 'outlined'
+        job.status = True  # True = outlined
         
         # Store competitor keywords in semantic_keywords_2 field (as a workaround)
         if competitor_keywords:

@@ -1,5 +1,5 @@
 # models.py - Updated ContentJob model
-from sqlalchemy import Column, Integer, String, TIMESTAMP, func, ForeignKey, Text, JSON
+from sqlalchemy import Column, Integer, String, TIMESTAMP, func, ForeignKey, Text, JSON, Boolean
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -24,7 +24,8 @@ class ContentJob(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     title = Column(Text, nullable=True)
-    status = Column(Text, nullable=True)
+    status = Column(Boolean, nullable=False, default=False)  # False = pending, True = outlined
+    isApproved = Column("isapproved", Boolean, nullable=False, default=False)  # PostgreSQL converts to lowercase
     created_at = Column(TIMESTAMP, server_default=func.now())
     outline_prompt = Column(Text, nullable=True)
     

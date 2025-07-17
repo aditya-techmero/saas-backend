@@ -133,8 +133,9 @@ def test_comprehensive_validation():
         outline = OutlineSchema(**outline_data)
         print("✅ Complete valid outline passed all validation checks")
         
-        # Verify the outline can be serialized
-        outline_json = outline.dict()
+        # Use fresh outline data for this test
+        outline_schema = OutlineSchema(**outline_data)
+        outline_json = outline_schema.model_dump()  # Use model_dump instead of dict()
         json_string = json.dumps(outline_json, indent=2)
         print(f"✅ Outline serialization successful ({len(json_string)} characters)")
         

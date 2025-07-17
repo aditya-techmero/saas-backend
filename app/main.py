@@ -125,7 +125,8 @@ class ContentJobOut(BaseModel):
     wordpress_credentials_id: int
     competitor_url_1: Optional[str] = None
     competitor_url_2: Optional[str] = None
-    status: str
+    status: bool  # Changed from str to bool
+    isApproved: bool  # New field for approval status
     semantic_keywords: Optional[List[str]] = None
     semantic_keywords_2: Optional[List[str]] = None
     outline: Optional[Dict[str, Any]] = None
@@ -425,7 +426,8 @@ def get_my_jobs(current_user: User = Depends(get_current_user), db: Session = De
                 "article_length": job.article_length,
                 "competitor_url_1": job.competitor_url_1,
                 "competitor_url_2": job.competitor_url_2,
-                "status": job.status,
+                "status": job.status,  # Now boolean
+                "isApproved": job.isApproved,  # New field
                 "semantic_keywords": job.semantic_keywords if job.semantic_keywords else [],
                 "semantic_keywords_2": job.semantic_keywords_2 if job.semantic_keywords_2 else [],
                 "outline": outline,
@@ -459,14 +461,14 @@ def create_job(
 
         # Handle optional outline with validation
         outline_json = None
-        job_status = "pending"
+        job_status = False  # False = pending, True = outlined
         
         if job.Outline:
             try:
                 # Validate outline against schema if provided
                 outline_schema = OutlineSchema(**job.Outline)
                 outline_json = json.dumps(outline_schema.dict(), indent=2)
-                job_status = "outlined"
+                job_status = True  # True = outlined
                 logger.info(f"Job created with valid outline for user {current_user.username}")
             except Exception as e:
                 logger.warning(f"Invalid outline provided during job creation: {e}")
@@ -489,6 +491,7 @@ def create_job(
             audienceType=job.audienceType,
             toneOfVoice=job.toneOfVoice,
             status=job_status,
+            isApproved=False,  # Default to not approved
             wordpress_credentials_id=job.wordpress_credentials_id,
             Outline=outline_json
         )
@@ -507,6 +510,7 @@ def create_job(
             competitor_url_1=new_job.competitor_url_1,
             competitor_url_2=new_job.competitor_url_2,
             status=new_job.status,
+            isApproved=new_job.isApproved,
             semantic_keywords=new_job.semantic_keywords,
             semantic_keywords_2=new_job.semantic_keywords_2,
             outline=json.loads(new_job.Outline) if new_job.Outline else {},
@@ -902,10 +906,10 @@ def update_job_outline(
             )
         
         # Additional business logic validation
-        if job.status == "completed":
+        if job.isApproved:
             raise HTTPException(
                 status_code=400,
-                detail="Cannot update outline for completed jobs"
+                detail="Cannot update outline for approved jobs"
             )
         
         # Validate word count consistency
@@ -932,7 +936,7 @@ def update_job_outline(
         
         # Update the job in database
         job.Outline = json.dumps(outline_json, indent=2)
-        job.status = "outlined"  # Update status to indicate outline is ready
+        job.status = True  # True = outlined
         
         db.commit()
         
@@ -1011,5 +1015,171 @@ def get_job_outline(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve job outline: {str(e)}"
+        )
+
+# ===== JOB APPROVAL ENDPOINTS =====
+
+@app.put("/jobs/{job_id}/approve")
+def approve_job(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Approve a job (set isApproved to True)
+    """
+    try:
+        # Validate job exists and belongs to current user
+        job = db.query(ContentJob).filter(
+            ContentJob.id == job_id,
+            ContentJob.user_id == current_user.id
+        ).first()
+        
+        if not job:
+            raise HTTPException(
+                status_code=404,
+                detail="Content job not found or you don't have permission to access it"
+            )
+        
+        # Check if job has an outline
+        if not job.status:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot approve job without an outline. Please create an outline first."
+            )
+        
+        # Check if already approved
+        if job.isApproved:
+            return {
+                "success": True,
+                "message": "Job is already approved",
+                "job_id": job_id,
+                "isApproved": True
+            }
+        
+        # Approve the job
+        job.isApproved = True
+        db.commit()
+        
+        logger.info(f"Job {job_id} approved by user {current_user.username}")
+        
+        return {
+            "success": True,
+            "message": "Job approved successfully",
+            "job_id": job_id,
+            "isApproved": True
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error approving job: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to approve job: {str(e)}"
+        )
+
+@app.put("/jobs/{job_id}/unapprove")
+def unapprove_job(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Unapprove a job (set isApproved to False)
+    """
+    try:
+        # Validate job exists and belongs to current user
+        job = db.query(ContentJob).filter(
+            ContentJob.id == job_id,
+            ContentJob.user_id == current_user.id
+        ).first()
+        
+        if not job:
+            raise HTTPException(
+                status_code=404,
+                detail="Content job not found or you don't have permission to access it"
+            )
+        
+        # Check if already unapproved
+        if not job.isApproved:
+            return {
+                "success": True,
+                "message": "Job is already unapproved",
+                "job_id": job_id,
+                "isApproved": False
+            }
+        
+        # Unapprove the job
+        job.isApproved = False
+        db.commit()
+        
+        logger.info(f"Job {job_id} unapproved by user {current_user.username}")
+        
+        return {
+            "success": True,
+            "message": "Job unapproved successfully",
+            "job_id": job_id,
+            "isApproved": False
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error unapproving job: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to unapprove job: {str(e)}"
+        )
+
+@app.get("/jobs/{job_id}/status")
+def get_job_status(
+    job_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Get the status and approval status of a job
+    """
+    try:
+        # Validate job exists and belongs to current user
+        job = db.query(ContentJob).filter(
+            ContentJob.id == job_id,
+            ContentJob.user_id == current_user.id
+        ).first()
+        
+        if not job:
+            raise HTTPException(
+                status_code=404,
+                detail="Content job not found or you don't have permission to access it"
+            )
+        
+        # Convert boolean status to readable format
+        status_text = "outlined" if job.status else "pending"
+        approval_text = "approved" if job.isApproved else "not approved"
+        
+        return {
+            "job_id": job_id,
+            "title": job.title,
+            "status": job.status,
+            "status_text": status_text,
+            "isApproved": job.isApproved,
+            "approval_text": approval_text,
+            "has_outline": bool(job.Outline),
+            "created_at": job.created_at.isoformat() if job.created_at else None
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error retrieving job status: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to retrieve job status: {str(e)}"
         )
 
