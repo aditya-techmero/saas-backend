@@ -24,20 +24,26 @@ def main():
         action='store_true',
         help='Enable debug mode with console logging'
     )
+    parser.add_argument(
+        '--workers', 
+        type=int, 
+        default=3,
+        help='Number of parallel workers for section generation (default: 3)'
+    )
     
     args = parser.parse_args()
     
     # Print startup message
     if args.debug:
-        print(f"🚀 Starting Clean Blog Automation (DEBUG MODE - max {args.max_jobs} jobs)")
+        print(f"🚀 Starting Clean Blog Automation (DEBUG MODE - max {args.max_jobs} jobs, {args.workers} workers)")
     else:
-        print(f"🚀 Starting Clean Blog Automation (max {args.max_jobs} jobs)")
+        print(f"🚀 Starting Clean Blog Automation (max {args.max_jobs} jobs, {args.workers} workers)")
         print("💡 Use --debug flag to see console logs")
     
     print("=" * 60)
     
-    # Create automation instance with debug flag
-    automation = CleanBlogAutomation(debug=args.debug)
+    # Create automation instance with debug flag and workers
+    automation = CleanBlogAutomation(debug=args.debug, workers=args.workers)
     automation.run_automation(args.max_jobs)
 
 if __name__ == "__main__":

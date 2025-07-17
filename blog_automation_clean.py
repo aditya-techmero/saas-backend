@@ -327,12 +327,13 @@ class ImageGenerator:
 class CleanBlogAutomation:
     """Clean, simple blog automation with Markdown → HTML → WordPress workflow."""
     
-    def __init__(self, debug: bool = False):
+    def __init__(self, debug: bool = False, workers: int = 3):
         # Setup logging first
         global logger
         logger = setup_logging(debug)
         
         self.debug = debug
+        self.workers = workers
         self.db = SessionLocal()
         self.markdown_generator = MarkdownBlogGenerator()
         self.html_converter = MarkdownToHTMLConverter()
@@ -381,8 +382,8 @@ class CleanBlogAutomation:
             logger.info(f"🚀 Starting workflow for job {job.id}: {job.title}")
             
             # Step 1: Generate Markdown content
-            logger.info(f"📝 Step 1: Generating Markdown content...")
-            markdown_content = self.markdown_generator.generate_blog_post(job)
+            logger.info(f"📝 Step 1: Generating Markdown content (using {self.workers} workers)...")
+            markdown_content = self.markdown_generator.generate_blog_post(job, max_workers=self.workers)
             
             if not markdown_content:
                 logger.error(f"❌ Failed to generate markdown for job {job.id}")
@@ -507,13 +508,17 @@ class CleanBlogAutomation:
             logger.error(f"Error uploading to WordPress: {str(e)}")
             return None
     
-    def run_automation(self, max_jobs: int = 5) -> None:
+    def run_automation(self, max_jobs: int = 5, workers: int = None) -> None:
         """Run the complete automation workflow."""
         try:
+            # Use provided workers or default to instance workers
+            if workers is not None:
+                self.workers = workers
+            
             if self.debug:
-                logger.info("🔥 Starting Clean Blog Automation (DEBUG MODE)")
+                logger.info(f"🔥 Starting Clean Blog Automation (DEBUG MODE - {self.workers} workers)")
             else:
-                logger.info("🔥 Starting Clean Blog Automation")
+                logger.info(f"🔥 Starting Clean Blog Automation ({self.workers} workers)")
             logger.info("=" * 60)
             
             # Get approved jobs

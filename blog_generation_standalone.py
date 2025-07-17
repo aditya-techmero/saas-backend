@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from requests.auth import HTTPBasicAuth
+import concurrent.futures
+import threading
 
 # Add the parent directory to the path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -291,6 +293,37 @@ class BlogGenerator:
             logger.error(f"Error processing outline: {str(e)}")
             raise BlogGenerationError(f"Error processing outline: {str(e)}")
     
+    def generate_section_content_threaded(self, section: Dict[str, Any], job: ContentJob, section_index: int) -> tuple[int, str]:
+        """Generate content for a specific section with threading support."""
+        try:
+            # Extract section information
+            section_id = section.get('id', '')
+            section_title = section.get('title', '')
+            section_content = section.get('content', [])
+            heading_tag = section.get('headingTag', 'h2')
+            
+            # Build the content generation prompt
+            prompt = self.build_section_prompt(section, job)
+            
+            # Generate content using OpenAI
+            generated_content = self.openai_client.generate_text(
+                prompt=prompt,
+                temperature=0.7,
+                max_tokens=2000
+            )
+            
+            # Format the content as WordPress blocks
+            formatted_content = self.format_as_wordpress_blocks(
+                generated_content, section_title, heading_tag
+            )
+            
+            logger.info(f"Generated content for section {section_index + 1}: {section_title}")
+            return (section_index, formatted_content)
+            
+        except Exception as e:
+            logger.error(f"Error generating section content for section {section_index + 1}: {str(e)}")
+            return (section_index, f'<!-- wp:heading {{"level":2}} -->\n<h2>{section.get("title", "Error")}</h2>\n<!-- /wp:heading -->\n\n<!-- wp:paragraph -->\n<p>Content generation failed for this section.</p>\n<!-- /wp:paragraph -->\n\n')
+
     def generate_section_content(self, section: Dict[str, Any], job: ContentJob) -> str:
         """Generate content for a specific section."""
         try:
@@ -321,6 +354,45 @@ class BlogGenerator:
         except Exception as e:
             logger.error(f"Error generating section content: {str(e)}")
             raise BlogGenerationError(f"Error generating section content: {str(e)}")
+
+    def generate_sections_parallel(self, chapters: List[Dict], job: ContentJob, max_workers: int = 3) -> List[str]:
+        """Generate all sections in parallel using ThreadPoolExecutor."""
+        try:
+            logger.info(f"Starting parallel generation of {len(chapters)} sections with {max_workers} workers")
+            
+            # Use ThreadPoolExecutor for parallel processing
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all section generation tasks
+                future_to_section = {
+                    executor.submit(self.generate_section_content_threaded, chapter, job, i): i
+                    for i, chapter in enumerate(chapters)
+                }
+                
+                # Collect results as they complete
+                results = {}
+                for future in concurrent.futures.as_completed(future_to_section):
+                    section_index, content = future.result()
+                    results[section_index] = content
+                    logger.info(f"✅ Completed section {section_index + 1}/{len(chapters)}")
+            
+            # Sort results by original order and return
+            sorted_results = [results[i] for i in sorted(results.keys())]
+            logger.info(f"✅ All {len(chapters)} sections generated successfully")
+            return sorted_results
+            
+        except Exception as e:
+            logger.error(f"Error in parallel section generation: {str(e)}")
+            # Fallback to sequential processing
+            logger.info("Falling back to sequential processing...")
+            return self.generate_sections_sequential(chapters, job)
+    
+    def generate_sections_sequential(self, chapters: List[Dict], job: ContentJob) -> List[str]:
+        """Fallback method for sequential section generation."""
+        results = []
+        for i, chapter in enumerate(chapters):
+            _, content = self.generate_section_content_threaded(chapter, job, i)
+            results.append(content)
+        return results
     
     def build_section_prompt(self, section: Dict[str, Any], job: ContentJob) -> str:
         """Build the prompt for generating section content."""
@@ -536,36 +608,63 @@ Write 5-7 FAQs now:"""
         
         return formatted_content
     
-    def generate_blog_post(self, job: ContentJob) -> str:
-        """Generate complete blog post for a job."""
+    def generate_blog_post(self, job: ContentJob, max_workers: int = 3) -> str:
+        """Generate complete blog post for a job with parallel processing."""
         try:
             logger.info(f"Generating blog post for job {job.id}: {job.title}")
+            start_time = time.time()
             
             # Parse the outline
             chapters = self.parse_outline(job.Outline)
             
             # Generate introduction
+            logger.info("🚀 Generating introduction...")
+            intro_start = time.time()
             introduction = self.generate_introduction(job)
+            intro_time = time.time() - intro_start
+            logger.info(f"✅ Introduction generated in {intro_time:.2f} seconds")
             
-            # Generate main content sections
+            # Generate main content sections in parallel
+            logger.info(f"🚀 Generating {len(chapters)} sections in parallel...")
+            sections_start = time.time()
+            section_contents = self.generate_sections_parallel(chapters, job, max_workers)
+            sections_time = time.time() - sections_start
+            logger.info(f"✅ All sections generated in {sections_time:.2f} seconds")
+            
+            # Combine all sections
             main_content = ""
-            for chapter in chapters:
-                section_content = self.generate_section_content(chapter, job)
+            for section_content in section_contents:
                 main_content += section_content
             
             # Generate FAQ section
+            logger.info("🚀 Generating FAQ section...")
+            faq_start = time.time()
             faqs = self.generate_faqs(job)
+            faq_time = time.time() - faq_start
+            logger.info(f"✅ FAQ section generated in {faq_time:.2f} seconds")
             
             # Generate conclusion
+            logger.info("🚀 Generating conclusion...")
+            conclusion_start = time.time()
             conclusion = self.generate_conclusion(job, main_content)
+            conclusion_time = time.time() - conclusion_start
+            logger.info(f"✅ Conclusion generated in {conclusion_time:.2f} seconds")
             
             # Combine all sections
             full_content = introduction + main_content + faqs + conclusion
             
             # Generate and insert images
+            logger.info("🚀 Adding images to content...")
+            image_start = time.time()
             full_content = self.add_images_to_content(full_content, job)
+            image_time = time.time() - image_start
+            logger.info(f"✅ Images added in {image_time:.2f} seconds")
             
-            logger.info(f"Successfully generated blog post for job {job.id}")
+            total_time = time.time() - start_time
+            logger.info(f"✅ Successfully generated blog post for job {job.id}")
+            logger.info(f"⏱️ Total generation time: {total_time:.2f} seconds")
+            logger.info(f"📊 Time breakdown - Intro: {intro_time:.1f}s, Sections: {sections_time:.1f}s, FAQ: {faq_time:.1f}s, Conclusion: {conclusion_time:.1f}s, Images: {image_time:.1f}s")
+            
             return full_content
             
         except Exception as e:

@@ -21,6 +21,9 @@ from urllib.parse import urljoin, quote
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 import hashlib
+import threading
+import concurrent.futures
+from queue import Queue
 
 # Add the parent directory to the path so we can import from app
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -511,18 +514,22 @@ generated_at: {datetime.now().isoformat()}
             logger.error(f"Error saving Markdown locally: {str(e)}")
             return None
     
-    def generate_blog_post(self, job: ContentJob) -> str:
-        """Generate complete blog post in Markdown format."""
+    def generate_blog_post(self, job: ContentJob, max_workers: int = 3) -> str:
+        """Generate complete blog post in Markdown format with parallel processing."""
         try:
             logger.info(f"Generating Markdown blog post for job {job.id}: {job.title}")
+            start_time = time.time()
             
             # Parse the outline
             chapters = self.parse_outline(job.Outline)
+            logger.info(f"Parsed {len(chapters)} sections from outline (excluding intro/conclusion)")
             
             # Start with content - NO H1 title as WordPress uses post title as H1
             content = ""  # Remove H1 title generation
             
             # Generate introduction
+            logger.info("🚀 Generating introduction...")
+            intro_start = time.time()
             intro_prompt = f"""
             Write an engaging introduction for a blog post titled "{job.title}".
             
@@ -538,13 +545,23 @@ generated_at: {datetime.now().isoformat()}
             
             introduction = self.openai_client.generate_text(intro_prompt)
             content += self.clean_markdown(introduction) + "\n\n"
+            intro_time = time.time() - intro_start
+            logger.info(f"✅ Introduction generated in {intro_time:.2f} seconds")
             
-            # Generate main content sections
-            for chapter in chapters:
-                section_content = self.generate_section_content(chapter, job)
+            # Generate main content sections in parallel
+            logger.info(f"🚀 Generating {len(chapters)} sections in parallel...")
+            sections_start = time.time()
+            section_contents = self.generate_sections_parallel(chapters, job, max_workers)
+            sections_time = time.time() - sections_start
+            logger.info(f"✅ All sections generated in {sections_time:.2f} seconds")
+            
+            # Combine all sections
+            for section_content in section_contents:
                 content += section_content + "\n\n"
             
             # Generate conclusion
+            logger.info("🚀 Generating conclusion...")
+            conclusion_start = time.time()
             conclusion_prompt = f"""
             Write a conclusion for a blog post titled "{job.title}".
             
@@ -558,14 +575,24 @@ generated_at: {datetime.now().isoformat()}
             
             conclusion = self.openai_client.generate_text(conclusion_prompt)
             content += "## Conclusion\n\n" + self.clean_markdown(conclusion) + "\n\n"
+            conclusion_time = time.time() - conclusion_start
+            logger.info(f"✅ Conclusion generated in {conclusion_time:.2f} seconds")
             
             # Add images to content
+            logger.info("🖼️ Adding images to content...")
+            image_start = time.time()
             content = self.add_images_to_markdown(content, job)
+            image_time = time.time() - image_start
+            logger.info(f"✅ Images added in {image_time:.2f} seconds")
             
             # Save locally
             local_path = self.save_markdown_locally(content, job)
             
-            logger.info(f"Successfully generated Markdown blog post for job {job.id}")
+            total_time = time.time() - start_time
+            logger.info(f"✅ Successfully generated Markdown blog post for job {job.id}")
+            logger.info(f"⏱️ Total generation time: {total_time:.2f} seconds")
+            logger.info(f"📊 Time breakdown - Intro: {intro_time:.1f}s, Sections: {sections_time:.1f}s, Conclusion: {conclusion_time:.1f}s, Images: {image_time:.1f}s")
+            
             return content
             
         except Exception as e:
@@ -683,6 +710,104 @@ generated_at: {datetime.now().isoformat()}
         except Exception as e:
             logger.error(f"Error processing outline: {str(e)}")
             return []
+    
+    def generate_section_content_threaded(self, section: Dict, job: ContentJob, section_index: int) -> tuple[int, str]:
+        """Generate content for a section in Markdown format with threading support."""
+        try:
+            # Build context from section details
+            section_context = f"Title: {section.get('title', 'Untitled')}"
+            
+            if section.get('description'):
+                section_context += f"\nDescription: {section['description']}"
+            
+            if section.get('key_points'):
+                section_context += f"\nKey Points to Cover: {', '.join(section['key_points'])}"
+            
+            if section.get('keywords_to_include'):
+                section_context += f"\nKeywords to Include: {', '.join(section['keywords_to_include'])}"
+            
+            prompt = f"""
+            Generate a comprehensive section for a blog post about "{job.title}".
+            
+            Section Details:
+            {section_context}
+            
+            Article Context:
+            - Main Keyword: {job.mainKeyword}
+            - Related Keywords: {job.related_keywords}
+            - Tone: {job.toneOfVoice}
+            - Audience: {job.audienceType}
+            
+            Requirements:
+            - Output in PURE MARKDOWN format only
+            - Use ## for the main section heading
+            - Use ### for subsections if needed
+            - Include bullet points and numbered lists where appropriate
+            - Write in {job.toneOfVoice} tone for {job.audienceType}
+            - Naturally incorporate the keywords provided
+            - Make it comprehensive and informative
+            - Length: 400-600 words
+            
+            Do not include any HTML, Gutenberg blocks, or other formatting.
+            Only pure Markdown syntax.
+            """
+            
+            response = self.openai_client.generate_text(prompt)
+            
+            # Clean up the response to ensure pure Markdown
+            content = response.strip()
+            
+            # Remove any HTML tags if present
+            content = re.sub(r'<[^>]+>', '', content)
+            
+            # Ensure proper markdown formatting
+            content = self.clean_markdown(content)
+            
+            logger.info(f"Generated Markdown content for section: {section.get('title')}")
+            return (section_index, content)
+            
+        except Exception as e:
+            logger.error(f"Error generating section content: {str(e)}")
+            return (section_index, f"## {section.get('title', 'Error')}\n\nContent generation failed for this section.\n\n")
+
+    def generate_sections_parallel(self, chapters: List[Dict], job: ContentJob, max_workers: int = 3) -> List[str]:
+        """Generate all sections in parallel using ThreadPoolExecutor."""
+        try:
+            logger.info(f"Starting parallel generation of {len(chapters)} sections with {max_workers} workers")
+            
+            # Use ThreadPoolExecutor for parallel processing
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all section generation tasks
+                future_to_section = {
+                    executor.submit(self.generate_section_content_threaded, chapter, job, i): i
+                    for i, chapter in enumerate(chapters)
+                }
+                
+                # Collect results as they complete
+                results = {}
+                for future in concurrent.futures.as_completed(future_to_section):
+                    section_index, content = future.result()
+                    results[section_index] = content
+                    logger.info(f"✅ Completed section {section_index + 1}/{len(chapters)}")
+            
+            # Sort results by original order and return
+            sorted_results = [results[i] for i in sorted(results.keys())]
+            logger.info(f"✅ All {len(chapters)} sections generated successfully")
+            return sorted_results
+            
+        except Exception as e:
+            logger.error(f"Error in parallel section generation: {str(e)}")
+            # Fallback to sequential processing
+            logger.info("Falling back to sequential processing...")
+            return self.generate_sections_sequential(chapters, job)
+    
+    def generate_sections_sequential(self, chapters: List[Dict], job: ContentJob) -> List[str]:
+        """Fallback method for sequential section generation."""
+        results = []
+        for i, chapter in enumerate(chapters):
+            _, content = self.generate_section_content_threaded(chapter, job, i)
+            results.append(content)
+        return results
 
 def main():
     """Main entry point."""

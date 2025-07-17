@@ -17,6 +17,8 @@ from typing import Dict, List, Optional, Any
 from urllib.parse import urljoin
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
+import concurrent.futures
+import threading
 
 # Add the parent directory to the path so we can import from app
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -334,36 +336,63 @@ class EnhancedBlogGenerator(BaseGenerator):
             # Return original content if image processing fails
             return content
     
-    def generate_blog_post(self, job: ContentJob) -> str:
-        """Generate complete blog post for a job with images."""
+    def generate_blog_post(self, job: ContentJob, max_workers: int = 3) -> str:
+        """Generate complete blog post for a job with images and parallel processing."""
         try:
             logger.info(f"Generating blog post for job {job.id}: {job.title}")
+            start_time = time.time()
             
             # Parse the outline
             chapters = self.parse_outline(job.Outline)
             
             # Generate introduction
+            logger.info("🚀 Generating introduction...")
+            intro_start = time.time()
             introduction = self.generate_introduction(job)
+            intro_time = time.time() - intro_start
+            logger.info(f"✅ Introduction generated in {intro_time:.2f} seconds")
             
-            # Generate main content sections
+            # Generate main content sections in parallel
+            logger.info(f"🚀 Generating {len(chapters)} sections in parallel...")
+            sections_start = time.time()
+            section_contents = self.generate_sections_parallel(chapters, job, max_workers)
+            sections_time = time.time() - sections_start
+            logger.info(f"✅ All sections generated in {sections_time:.2f} seconds")
+            
+            # Combine all sections
             main_content = ""
-            for chapter in chapters:
-                section_content = self.generate_section_content(chapter, job)
+            for section_content in section_contents:
                 main_content += section_content
             
             # Generate FAQ section
+            logger.info("🚀 Generating FAQ section...")
+            faq_start = time.time()
             faqs = self.generate_faqs(job)
+            faq_time = time.time() - faq_start
+            logger.info(f"✅ FAQ section generated in {faq_time:.2f} seconds")
             
             # Generate conclusion
+            logger.info("🚀 Generating conclusion...")
+            conclusion_start = time.time()
             conclusion = self.generate_conclusion(job)
+            conclusion_time = time.time() - conclusion_start
+            logger.info(f"✅ Conclusion generated in {conclusion_time:.2f} seconds")
             
             # Combine all sections
             full_content = introduction + main_content + faqs + conclusion
             
             # Generate and insert images
+            logger.info("🚀 Adding images to content...")
+            image_start = time.time()
             full_content = self.add_images_to_content(full_content, job)
+            image_time = time.time() - image_start
+            logger.info(f"✅ Images added in {image_time:.2f} seconds")
             
-            logger.info(f"Successfully generated blog post for job {job.id}")
+            total_time = time.time() - start_time
+            logger.info(f"✅ Successfully generated blog post for job {job.id}")
+            logger.info(f"⏱️ Total generation time: {total_time:.2f} seconds")
+            logger.info(f"📊 Time breakdown - Intro: {intro_time:.1f}s, Sections: {sections_time:.1f}s, FAQ: {faq_time:.1f}s, Conclusion: {conclusion_time:.1f}s, Images: {image_time:.1f}s")
+            
             return full_content
             
         except Exception as e:
